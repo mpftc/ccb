@@ -37,3 +37,10 @@ test('generated userscript checks upstream info and cleans up wrapper blob URLs'
     assert.ok(script.includes('w.URL.revokeObjectURL(url)'))
     assert.equal(script.includes("if (typeof module !== 'undefined' && module.exports)"), false)
 })
+
+test('broad initial state does not trigger benchmark traffic for recommended videos', () => {
+    const initialStateBlock = script.match(/watchGlobal\('__INITIAL_STATE__'[\s\S]*?\n    \}\)/)
+    assert.ok(initialStateBlock, 'missing __INITIAL_STATE__ hook')
+    assert.equal(initialStateBlock[0].includes('prepareAutoSelectionFromPlayInfo'), false)
+    assert.ok(initialStateBlock[0].includes('transformPlayUrlResponse'))
+})

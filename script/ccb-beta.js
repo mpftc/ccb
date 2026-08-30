@@ -3,7 +3,7 @@
 // @description  CCB GitHub 动态节点、持续能力测速与按视频智能选线
 // @namespace    CCB
 // @license      MIT
-// @version      2.5.2-personal.1
+// @version      2.5.3-personal.1
 // @author       鼠鼠今天吃嘉然
 // @updateURL    https://raw.githubusercontent.com/mpftc/ccb/refs/heads/personal/ccb-2.5/script/ccb-beta.js
 // @downloadURL  https://raw.githubusercontent.com/mpftc/ccb/refs/heads/personal/ccb-2.5/script/ccb-beta.js
@@ -2661,7 +2661,7 @@
         try { transformPlayUrlResponse(obj) } catch (_) {}
     })
     watchGlobal('__INITIAL_STATE__', (obj) => {
-        prepareAutoSelectionFromPlayInfo(obj)
+        // INITIAL_STATE 可能同时包含推荐和预加载视频；只做兼容改写，不能据此启动当前视频测速。
         if (!isCcbEnabled()) return
         try { transformPlayUrlResponse(obj) } catch (_) {}
     })
@@ -3431,7 +3431,7 @@
             const brand = el('div', 'ccb-brand')
             brand.appendChild(el('div', 'ccb-title', 'CCB 智能网络'))
             brand.appendChild(el('div', 'ccb-subtitle', '持续能力排名 · 当前视频码率门槛'))
-            const version = el('div', 'ccb-version', 'v2.5.2')
+            const version = el('div', 'ccb-version', 'v2.5.3')
             const closeBtn = el('button', 'ccb-icon-btn', '×')
             closeBtn.type = 'button'
             closeBtn.title = '关闭'

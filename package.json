@@ -1,7 +1,7 @@
 {
   "name": "ccb-personal-userscript",
   "private": true,
-  "version": "2.5.2",
+  "version": "2.5.3",
   "scripts": {
     "build": "node tools/build-userscript.cjs",
     "check:generated": "node tools/build-userscript.cjs --check",
