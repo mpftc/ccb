@@ -5,8 +5,8 @@
 // @license      MIT
 // @version      2.5.2-personal.1
 // @author       鼠鼠今天吃嘉然
-// @updateURL    https://raw.githubusercontent.com/mpftc/ccb/personal/ccb-2.5/script/ccb-beta.js
-// @downloadURL  https://raw.githubusercontent.com/mpftc/ccb/personal/ccb-2.5/script/ccb-beta.js
+// @updateURL    https://raw.githubusercontent.com/mpftc/ccb/refs/heads/personal/ccb-2.5/script/ccb-beta.js
+// @downloadURL  https://raw.githubusercontent.com/mpftc/ccb/refs/heads/personal/ccb-2.5/script/ccb-beta.js
 // @run-at       document-start
 // @match        https://www.bilibili.com/video/*
 // @match        https://www.bilibili.com/bangumi/play/*

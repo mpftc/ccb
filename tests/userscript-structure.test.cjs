@@ -25,7 +25,7 @@ test('generated userscript keeps the approved benchmark parameters', () => {
 })
 
 test('generated userscript checks upstream info and cleans up wrapper blob URLs', () => {
-    assert.ok(script.includes('https://raw.githubusercontent.com/mpftc/ccb/personal/ccb-2.5/script/ccb-beta.js'))
+    assert.ok(script.includes('https://raw.githubusercontent.com/mpftc/ccb/refs/heads/personal/ccb-2.5/script/ccb-beta.js'))
     assert.ok(script.includes('raw.githubusercontent.com/Kanda-Akihito-Kun/ccb/main/data'))
     assert.ok(script.includes('fetchCatalogInfo(source)'))
     assert.ok(script.includes('上游版本未变化，继续使用本地缓存'))

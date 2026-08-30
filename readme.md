@@ -10,7 +10,7 @@
 
 `personal/ccb-2.5` 分支供个人使用，不准备向原项目提交 PR。安装地址：
 
-https://raw.githubusercontent.com/mpftc/ccb/personal/ccb-2.5/script/ccb-beta.js
+https://raw.githubusercontent.com/mpftc/ccb/refs/heads/personal/ccb-2.5/script/ccb-beta.js
 
 - 节点目录直接跟随原项目 GitHub Raw，Pages 作为回退；
 - 保留全节点并发短筛，最终节点改用视频中段的多轮真实分段复测；
