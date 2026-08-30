@@ -1,0 +1,12 @@
+{
+  "name": "ccb-personal-userscript",
+  "private": true,
+  "version": "2.5.1",
+  "scripts": {
+    "build": "node tools/build-userscript.cjs",
+    "check:generated": "node tools/build-userscript.cjs --check",
+    "lint": "node --check src/ccb-beta.template.js && node --check src/core/media-url.js && node --check src/core/benchmark-math.js && node --check src/core/worker-url.js && node --check src/core/catalog-version.js && node --check tools/build-userscript.cjs",
+    "test": "node --test tests/*.test.cjs",
+    "check": "npm run lint && npm test && npm run check:generated"
+  }
+}

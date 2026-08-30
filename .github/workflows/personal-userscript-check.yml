@@ -1,0 +1,40 @@
+name: Check Personal Userscript
+
+on:
+  push:
+    paths:
+      - 'src/**'
+      - 'script/ccb-beta.js'
+      - 'tests/**'
+      - 'tools/**'
+      - 'package.json'
+      - '.github/workflows/personal-userscript-check.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'script/ccb-beta.js'
+      - 'tests/**'
+      - 'tools/**'
+      - 'package.json'
+      - '.github/workflows/personal-userscript-check.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: personal-userscript-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm run build
+      - run: npm run lint
+      - run: npm test
+      - run: git diff --exit-code -- script/ccb-beta.js

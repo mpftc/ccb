@@ -1,9 +1,8 @@
 name: Update CDN Data
 
 on:
-  schedule:
-    - cron: '0 20 * * 6'  # 每周日东八区凌晨 4 点 (UTC 的前一天 20 点) 运行
-  workflow_dispatch:  # 允许手动触发
+  # 个人油猴版直接读取上游 Raw/Pages；这里仅保留故障排查时的手动刷新能力。
+  workflow_dispatch:
 
 concurrency:
   group: update-cdn-data
