@@ -12,6 +12,14 @@ const {
 } = require('../src/core/benchmark-math.js')
 const { ccbResolveWorkerScriptUrl } = require('../src/core/worker-url.js')
 const { ccbCatalogRefreshDecision } = require('../src/core/catalog-version.js')
+const {
+    ccbParseContentRangeTotal,
+    ccbPickProbeRangeStart,
+} = require('../src/core/probe-range.js')
+const {
+    ccbPickNextRouteNode,
+    ccbShouldPreserveRouteHost,
+} = require('../src/core/runtime-route.js')
 
 test('media matching checks the actual hostname, not query-string text', () => {
     assert.equal(ccbHasMediaDomain('https://upos.example.bilivideo.com/video.m4s'), true)
@@ -68,4 +76,27 @@ test('sustained metrics prefer a steady transfer over a burst that collapses', (
     assert.equal(steady.stability, 1)
     assert.ok(collapsing.stability < 1)
     assert.equal(ccbSamplePercentile([9, 1, 5, 3, 7], 0.20), 1)
+})
+
+test('deep probes use distinct middle ranges when the file size is known', () => {
+    const total = 777766052
+    const bytes = 3 * 1024 * 1024
+    const starts = [0, 1, 2].map(round => ccbPickProbeRangeStart(total, bytes, round, 3, 'video-1'))
+    assert.equal(new Set(starts).size, 3)
+    assert.ok(starts.every(start => start >= total * 0.08 && start + bytes <= total * 0.88))
+    assert.equal(ccbPickProbeRangeStart(bytes, bytes, 0, 3, 'small'), 0)
+    assert.equal(ccbParseContentRangeTotal('Content-Range: bytes 10-20/777766052\r\n'), total)
+    assert.equal(ccbParseContentRangeTotal('Content-Type: video/mp4'), 0)
+})
+
+test('runtime failover preserves healthy backups and skips failed routes', () => {
+    const routes = ['primary.example', 'backup-a.example', 'backup-b.example']
+    assert.equal(ccbShouldPreserveRouteHost('BACKUP-A.EXAMPLE.', routes, []), true)
+    assert.equal(ccbShouldPreserveRouteHost('backup-a.example', routes, ['backup-a.example']), false)
+    assert.equal(ccbShouldPreserveRouteHost('other.example', routes, []), false)
+    assert.equal(
+        ccbPickNextRouteNode('primary.example', routes, ['primary.example', 'backup-a.example']),
+        'backup-b.example',
+    )
+    assert.equal(ccbPickNextRouteNode('backup-b.example', routes, routes), '')
 })

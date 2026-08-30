@@ -3,8 +3,10 @@
 // @description  CCB GitHub 动态节点、持续能力测速与按视频智能选线
 // @namespace    CCB
 // @license      MIT
-// @version      2.5.1-personal.1
+// @version      2.5.2-personal.1
 // @author       鼠鼠今天吃嘉然
+// @updateURL    https://raw.githubusercontent.com/mpftc/ccb/personal/ccb-2.5/script/ccb-beta.js
+// @downloadURL  https://raw.githubusercontent.com/mpftc/ccb/personal/ccb-2.5/script/ccb-beta.js
 // @run-at       document-start
 // @match        https://www.bilibili.com/video/*
 // @match        https://www.bilibili.com/bangumi/play/*
@@ -147,6 +149,65 @@
         return 'use-cache'
     }
 
+    function ccbParseContentRangeTotal(headers) {
+        const match = /(?:^|\r?\n)content-range:\s*bytes\s+(?:\d+-\d+|\*)\/(\d+|\*)/i.exec(String(headers || ''))
+        if (!match || match[1] === '*') return 0
+        const total = Number(match[1])
+        return Number.isSafeInteger(total) && total > 0 ? total : 0
+    }
+
+    function ccbHashText(value) {
+        let hash = 2166136261
+        for (const char of String(value || '')) {
+            hash ^= char.charCodeAt(0)
+            hash = Math.imul(hash, 16777619)
+        }
+        return hash >>> 0
+    }
+
+    function ccbPickProbeRangeStart(totalBytes, byteLimit, roundIndex, rounds, seed) {
+        const total = Math.max(0, Number(totalBytes) || 0)
+        const size = Math.max(1, Number(byteLimit) || 1)
+        if (!Number.isSafeInteger(total) || total <= size * 2) return 0
+
+        const maxStart = Math.max(0, total - size)
+        const safeStart = Math.min(maxStart, Math.floor(total * 0.08))
+        const safeEnd = Math.max(safeStart, Math.min(maxStart, Math.floor(total * 0.88) - size))
+        const span = Math.max(0, safeEnd - safeStart)
+        if (!span) return safeStart
+
+        const count = Math.max(1, Math.floor(Number(rounds) || 1))
+        const index = Math.max(0, Math.min(count - 1, Math.floor(Number(roundIndex) || 0)))
+        const slotWidth = span / count
+        const jitter = (ccbHashText(`${seed || ''}:${index}:${total}:${size}`) % 10000) / 10000
+        const start = safeStart + Math.floor(Math.min(span, slotWidth * index + slotWidth * (0.2 + jitter * 0.6)))
+        return Math.max(0, Math.min(maxStart, start))
+    }
+
+    function ccbNormalizeRouteHost(value) {
+        return String(value || '').trim().toLowerCase().replace(/\.$/, '')
+    }
+
+    function ccbShouldPreserveRouteHost(host, routeNodes, failedNodes) {
+        const normalized = ccbNormalizeRouteHost(host)
+        if (!normalized) return false
+        const routes = new Set((routeNodes || []).map(ccbNormalizeRouteHost).filter(Boolean))
+        const failed = new Set((failedNodes || []).map(ccbNormalizeRouteHost).filter(Boolean))
+        return routes.has(normalized) && !failed.has(normalized)
+    }
+
+    function ccbPickNextRouteNode(activeNode, routeNodes, failedNodes) {
+        const active = ccbNormalizeRouteHost(activeNode)
+        const failed = new Set((failedNodes || []).map(ccbNormalizeRouteHost).filter(Boolean))
+        const routes = [...new Set((routeNodes || []).map(ccbNormalizeRouteHost).filter(Boolean))]
+        const activeIndex = Math.max(-1, routes.indexOf(active))
+        for (let offset = 1; offset <= routes.length; offset++) {
+            const candidate = routes[(activeIndex + offset + routes.length) % routes.length]
+            if (candidate && candidate !== active && !failed.has(candidate)) return candidate
+        }
+        return ''
+    }
+
     const nodeCatalogSources = Object.freeze([
         Object.freeze({ id: 'github-raw', label: 'GitHub main/data', base: 'https://raw.githubusercontent.com/Kanda-Akihito-Kun/ccb/main/data' }),
         Object.freeze({ id: 'github-pages', label: 'GitHub Pages 兜底', base: 'https://kanda-akihito-kun.github.io/ccb/api' }),
@@ -214,11 +275,15 @@
     const autoScreenTimeoutMs = 3600
     const autoScreenBytes = 256 * 1024
     const autoScreenFinalistCount = 4
-    const autoSustainedTimeoutMs = 8000
-    const autoSustainedBytes = 1024 * 1024
+    const autoSustainedTimeoutMs = 6500
+    const autoSustainedDeadlineMs = 4500
+    const autoSustainedBytes = 3 * 1024 * 1024
+    const autoSustainedRounds = 3
     const autoSustainedFinalistCount = 3
     const autoSwitchGain = 1.25
-    const autoBitrateHeadroom = 1.50
+    const autoBitrateHeadroom = 2.50
+    const autoRuntimeFailureWindowMs = 15 * 1000
+    const autoRuntimeSwitchCooldownMs = 8 * 1000
     const autoFallbackRequiredMbps = 3
     const fullBenchmarkVersion = 2
     const fullBenchmarkReachRounds = 2
@@ -240,6 +305,7 @@
     const autoResultsByMediaKey = new Map()
     const autoInflightByMediaKey = new Map()
     const autoFailuresByMediaKey = new Map()
+    const autoRuntimeStateByMediaKey = new Map()
     const autoStatusListeners = new Set()
     let autoLatestResult = null
     let autoGeneration = 0
@@ -257,6 +323,7 @@
     let fullBenchmarkCache = null
     let fullBenchmarkLoaded = false
     let fullBenchmarkIndex = null
+    let lastPlaybackMediaUrl = ''
     const ccbWorkerPorts = new Set()
     const ccbInjectedWorkerBlobs = new WeakSet()
     const ccbInjectedWorkerUrls = new Set()
@@ -392,6 +459,8 @@
         return !!result.verifiedSustained
             && sustained >= required * autoBitrateHeadroom
             && Number(result.stability) >= 0.45
+            && Number(result.completionRate) >= 1
+            && Number(result.deadlineRate) >= 2 / 3
     }
     const getAutoMediaKey = (raw) => {
         if (typeof raw !== 'string' || !raw) return ''
@@ -410,8 +479,65 @@
         if (!key) return null
         const result = autoResultsByMediaKey.get(key)
         if (isAutoResultFresh(result)) return result
-        if (result) autoResultsByMediaKey.delete(key)
+        if (result) {
+            autoResultsByMediaKey.delete(key)
+            autoRuntimeStateByMediaKey.delete(key)
+        }
         return null
+    }
+    const getAutoRouteNodes = (result) => {
+        const nodes = []
+        const add = (value) => {
+            const node = ccbNormalizeRouteHost(value && typeof value === 'object' ? value.node : value)
+            if (node && !nodes.includes(node)) nodes.push(node)
+        }
+        add(result && result.node)
+        add(result && result.primary)
+        for (const backup of result && Array.isArray(result.backups) ? result.backups : []) add(backup)
+        return nodes
+    }
+    const getAutoRuntimeState = (raw, result) => {
+        const key = getAutoMediaKey(raw)
+        if (!key || !result) return null
+        let state = autoRuntimeStateByMediaKey.get(key)
+        const routes = getAutoRouteNodes(result)
+        if (!state) {
+            state = {
+                activeNode: ccbNormalizeRouteHost(result.activeNode || result.node),
+                routeNodes: routes,
+                failedNodes: new Set(),
+                failures: [],
+                lastSwitchAt: 0,
+                switches: 0,
+            }
+            autoRuntimeStateByMediaKey.set(key, state)
+        } else {
+            state.routeNodes = routes
+            if (!state.activeNode || !routes.includes(state.activeNode)) state.activeNode = routes[0] || ''
+        }
+        result.activeNode = state.activeNode || result.node
+        result.runtimeSwitches = state.switches
+        return state
+    }
+    const getAutoRouteConfig = (raw) => {
+        const result = raw ? getAutoResultForUrl(raw) : (isAutoResultFresh(autoLatestResult) ? autoLatestResult : null)
+        if (!result) return { activeNode: '', routeNodes: [], failedNodes: [] }
+        const keySource = raw || result.sourceUrl || lastPlaybackMediaUrl
+        const state = getAutoRuntimeState(keySource, result)
+        return {
+            activeNode: state && state.activeNode || result.node,
+            routeNodes: state ? state.routeNodes : getAutoRouteNodes(result),
+            failedNodes: state ? [...state.failedNodes] : [],
+        }
+    }
+    const shouldPreserveAutoRouteUrl = (raw) => {
+        if (!isAutoModeEnabled() || typeof raw !== 'string') return false
+        const result = getAutoResultForUrl(raw)
+        if (!result) return false
+        let host = ''
+        try { host = new URL(raw, location.href).hostname } catch (_) {}
+        const state = getAutoRuntimeState(raw, result)
+        return !!state && ccbShouldPreserveRouteHost(host, state.routeNodes, [...state.failedNodes])
     }
     const getAutoSelectedNode = (raw) => {
         if (!isAutoModeEnabled()) return ''
@@ -419,10 +545,13 @@
             const key = getAutoMediaKey(raw)
             if (key) {
                 const exact = getAutoResultForUrl(raw)
-                return exact ? exact.node : ''
+                const state = exact && getAutoRuntimeState(raw, exact)
+                return state ? state.activeNode : (exact ? exact.node : '')
             }
         }
-        return isAutoResultFresh(autoLatestResult) ? autoLatestResult.node : ''
+        if (!isAutoResultFresh(autoLatestResult)) return ''
+        const state = getAutoRuntimeState(autoLatestResult.sourceUrl || lastPlaybackMediaUrl, autoLatestResult)
+        return state ? state.activeNode : autoLatestResult.node
     }
     const getEffectiveNode = (raw) => getAutoSelectedNode(raw) || getCcbConfig().node
     const getReplacementParts = (raw) => {
@@ -551,8 +680,12 @@
             ccbWorkerRuntimeChannel = new BroadcastChannel(ccbWorkerRuntimeChannelName)
             ccbWorkerRuntimeChannel.addEventListener('message', (event) => {
                 const data = event && event.data
-                if (!data || data.type !== 'ccb-worker-rewrite') return
-                recordRewriteStats(getHostFromRewrittenValue(data.host), data.count)
+                if (!data) return
+                if (data.type === 'ccb-worker-rewrite') {
+                    recordRewriteStats(getHostFromRewrittenValue(data.host), data.count)
+                } else if (data.type === 'ccb-worker-failure') {
+                    recordAutoPlaybackFailure(data.url, data.reason || 'Worker 请求失败', 2)
+                }
             })
         }
     } catch (_) {}
@@ -608,6 +741,8 @@
         if (!hasMediaDomain(s)) return s
 
         if (isIgnoredHost(s)) return s
+        lastPlaybackMediaUrl = s
+        if (shouldPreserveAutoRouteUrl(s)) return s
         return replaceMediaUrlCore(s)
     }
 
@@ -731,7 +866,9 @@
         autoResultsByMediaKey.clear()
         autoInflightByMediaKey.clear()
         autoFailuresByMediaKey.clear()
+        autoRuntimeStateByMediaKey.clear()
         autoLatestResult = null
+        lastPlaybackMediaUrl = ''
         invalidateCcbCaches()
         emitAutoStatus('idle', message || '等待当前视频地址')
     }
@@ -1206,8 +1343,20 @@
     const calculateProbeSustainedMetrics = ccbCalculateProbeSustainedMetrics
 
     // Range 请求到达目标字节数就主动中止；即便某个 CDN 无视 Range，也不会误下载整段视频。
-    const probeAutoNode = (candidate, sourceUrl, byteLimit, timeoutMs, controller) => new Promise((resolve) => {
+    const probeAutoNode = (candidate, sourceUrl, byteLimit, timeoutMs, controller, options) => new Promise((resolve) => {
         const startedAt = clockNow()
+        const probeOptions = options && typeof options === 'object' ? options : {}
+        const knownTotalBytes = Math.max(0, Number(probeOptions.totalBytes) || Number(candidate && candidate.totalBytes) || 0)
+        const rangeStart = probeOptions.distributed
+            ? ccbPickProbeRangeStart(
+                knownTotalBytes,
+                byteLimit,
+                probeOptions.roundIndex,
+                probeOptions.rounds,
+                probeOptions.seed || sourceUrl,
+            )
+            : Math.max(0, Number(probeOptions.rangeStart) || 0)
+        const rangeEnd = rangeStart + byteLimit - 1
         let request = null
         let settled = false
         let status = 0
@@ -1238,7 +1387,8 @@
             const headers = String((response && response.responseHeaders) || responseHeaders || '')
             const isHtml = /(?:^|\r?\n)content-type:\s*text\/html/i.test(headers)
             const acceptedStatus = finalStatus === 200 || finalStatus === 206
-            const ok = !!transportOk && acceptedStatus && usedBytes > 0 && !isHtml
+            const complete = usedBytes >= byteLimit
+            const ok = !!transportOk && acceptedStatus && complete && !isHtml
             const errorText = getProbeErrorText(response, reason)
             const burstMbps = usedBytes > 1 ? usedBytes * 8 / elapsedMs / 1000 : 0
             const sustained = calculateProbeSustainedMetrics(progressSamples, usedBytes, elapsedMs, burstMbps)
@@ -1249,6 +1399,11 @@
                 bytes: usedBytes,
                 transferredBytes: loaded,
                 elapsedMs,
+                complete,
+                withinDeadline: ok && (!probeOptions.deadlineMs || elapsedMs <= probeOptions.deadlineMs),
+                rangeStart,
+                rangeEnd,
+                totalBytes: ccbParseContentRangeTotal(headers) || knownTotalBytes,
                 ttfbMs,
                 mbps: burstMbps,
                 burstMbps,
@@ -1274,7 +1429,7 @@
                 method: 'GET',
                 url: buildAutoProbeUrl(sourceUrl, candidate),
                 headers: {
-                    Range: `bytes=0-${byteLimit - 1}`,
+                    Range: `bytes=${rangeStart}-${rangeEnd}`,
                     'Cache-Control': 'no-cache',
                     Referer: 'https://www.bilibili.com/',
                 },
@@ -1306,6 +1461,37 @@
             finish(false, String(error && error.message || error))
         }
     })
+
+    const aggregateAutoProbeRounds = (candidate, results) => {
+        const samples = Array.isArray(results) ? results : []
+        const okSamples = samples.filter(result => result && result.ok)
+        const speeds = samples.map(result => result && result.ok ? getSustainedMbps(result) : 0)
+        const bursts = samples.map(result => result && result.ok ? Number(result.burstMbps) || 0 : 0)
+        const stabilitySamples = samples.map(result => result && result.ok ? Number(result.stability) || 0 : 0)
+        const ttfbs = okSamples.map(result => Number(result.ttfbMs) || 0).filter(value => value > 0)
+        const completionRate = okSamples.length / Math.max(1, samples.length)
+        const deadlineRate = samples.filter(result => result && result.withinDeadline).length / Math.max(1, samples.length)
+        const failure = samples.find(result => result && !result.ok)
+        return {
+            ...candidate,
+            ok: samples.length > 0 && completionRate >= 1,
+            complete: completionRate >= 1,
+            completionRate,
+            deadlineRate,
+            rounds: samples.length,
+            roundResults: samples,
+            bytes: okSamples.reduce((sum, result) => sum + (Number(result.bytes) || 0), 0),
+            transferredBytes: samples.reduce((sum, result) => sum + (Number(result.transferredBytes) || 0), 0),
+            elapsedMs: samplePercentile(okSamples.map(result => Number(result.elapsedMs) || 0), 0.50),
+            ttfbMs: samplePercentile(ttfbs, 0.50),
+            mbps: samplePercentile(bursts, 0.50),
+            burstMbps: samplePercentile(bursts, 0.50),
+            sustainedMbps: samplePercentile(speeds, 0.20),
+            stability: samplePercentile(stabilitySamples, 0.25),
+            totalBytes: Math.max(0, ...samples.map(result => Number(result && result.totalBytes) || 0)),
+            failureType: failure && failure.failureType || '',
+        }
+    }
 
     const updateAutoHealth = (firstRound, secondRound) => {
         const store = readAutoHealth()
@@ -1363,10 +1549,12 @@
     )
 
     const scoreSpeedCandidate = (result, health) => (
-        normalizedAutoSpeed(getSustainedMbps(result)) * 0.50
-        + Math.max(0, Math.min(1, Number(result.stability) || 0)) * 0.25
-        + getCandidateReliability(result, health) * 0.20
-        + normalizedAutoTtfb(result.ttfbMs) * 0.05
+        Math.max(0, Math.min(1, Number.isFinite(result.completionRate) ? result.completionRate : Number(result.ok))) * 0.30
+        + Math.max(0, Math.min(1, Number.isFinite(result.deadlineRate) ? result.deadlineRate : Number(result.ok))) * 0.25
+        + normalizedAutoSpeed(getSustainedMbps(result)) * 0.25
+        + Math.max(0, Math.min(1, Number(result.stability) || 0)) * 0.10
+        + getCandidateReliability(result, health) * 0.07
+        + normalizedAutoTtfb(result.ttfbMs) * 0.03
     )
 
     const summarizeProbeFailures = (results) => {
@@ -1394,10 +1582,135 @@
 
     const rememberAutoResult = (result, mediaKeys) => {
         if (!result) return
-        for (const key of mediaKeys) autoResultsByMediaKey.set(key, result)
+        const routes = getAutoRouteNodes(result)
+        for (const key of mediaKeys) {
+            const previous = autoResultsByMediaKey.get(key)
+            autoResultsByMediaKey.set(key, result)
+            let state = autoRuntimeStateByMediaKey.get(key)
+            if (!state || !previous || previous.node !== result.node || !routes.includes(state.activeNode)) {
+                state = {
+                    activeNode: ccbNormalizeRouteHost(result.activeNode || result.node),
+                    routeNodes: routes,
+                    failedNodes: new Set(),
+                    failures: [],
+                    lastSwitchAt: 0,
+                    switches: 0,
+                }
+                autoRuntimeStateByMediaKey.set(key, state)
+            } else {
+                state.routeNodes = routes
+            }
+            result.activeNode = state.activeNode || result.node
+            result.runtimeSwitches = state.switches
+        }
         autoLatestResult = result
         invalidateCcbCaches()
         broadcastCcbWorkerConfig()
+    }
+
+    const getPlaybackBufferAhead = (video) => {
+        if (!video || !video.buffered || !Number.isFinite(video.currentTime)) return Infinity
+        try {
+            for (let index = 0; index < video.buffered.length; index++) {
+                if (video.currentTime >= video.buffered.start(index) - 0.05
+                    && video.currentTime <= video.buffered.end(index) + 0.05
+                ) return Math.max(0, video.buffered.end(index) - video.currentTime)
+            }
+        } catch (_) {}
+        return 0
+    }
+
+    const markRuntimeNodeUnhealthy = (node) => {
+        if (!node) return
+        const health = readAutoHealth()
+        const entry = health[node] && typeof health[node] === 'object' ? health[node] : {}
+        entry.successes = Math.max(0, Number(entry.successes) || 0)
+        entry.failures = Math.max(0, Number(entry.failures) || 0) + 1
+        entry.failStreak = Math.max(0, Number(entry.failStreak) || 0) + 1
+        entry.cooldownUntil = Date.now() + autoCooldownMs
+        entry.updatedAt = Date.now()
+        health[node] = entry
+        writeAutoHealth(health)
+    }
+
+    function switchAutoRoute(raw, reason, failedHost) {
+        if (!isAutoModeEnabled()) return false
+        const result = getAutoResultForUrl(raw) || (isAutoResultFresh(autoLatestResult) ? autoLatestResult : null)
+        if (!result) return false
+        const routeSource = raw || result.sourceUrl || lastPlaybackMediaUrl
+        const state = getAutoRuntimeState(routeSource, result)
+        if (!state || !state.activeNode) return false
+        const now = Date.now()
+        if (now - state.lastSwitchAt < autoRuntimeSwitchCooldownMs) return false
+        const failedNode = ccbNormalizeRouteHost(failedHost || state.activeNode)
+        if (failedNode) {
+            state.failedNodes.add(failedNode)
+            markRuntimeNodeUnhealthy(failedNode)
+        }
+        if (failedNode && failedNode !== state.activeNode) {
+            invalidateCcbCaches()
+            broadcastCcbWorkerConfig()
+            return false
+        }
+        const next = ccbPickNextRouteNode(state.activeNode, state.routeNodes, [...state.failedNodes])
+        state.failures = []
+        state.lastSwitchAt = now
+        if (!next) {
+            result.runtimeExhausted = true
+            emitAutoStatus('fallback', `播放请求持续失败，但本视频备用节点已用尽（${reason}）`, result)
+            invalidateCcbCaches()
+            broadcastCcbWorkerConfig()
+            return false
+        }
+        const previous = state.activeNode
+        state.activeNode = next
+        state.switches++
+        result.activeNode = next
+        result.runtimeSwitches = state.switches
+        result.runtimeExhausted = false
+        invalidateCcbCaches()
+        broadcastCcbWorkerConfig()
+        emitAutoStatus('fallback', `检测到播放缓冲异常，已从 ${previous} 切换备用 ${next}（${reason}）`, result)
+        logger('播放故障触发备用节点切换', { previous, next, reason, switches: state.switches })
+        return true
+    }
+
+    function recordAutoPlaybackFailure(raw, reason, weight) {
+        if (!isAutoModeEnabled()) return false
+        const result = getAutoResultForUrl(raw) || (isAutoResultFresh(autoLatestResult) ? autoLatestResult : null)
+        if (!result) return false
+        const routeSource = raw || result.sourceUrl || lastPlaybackMediaUrl
+        const state = getAutoRuntimeState(routeSource, result)
+        if (!state) return false
+        let failedHost = ''
+        try { failedHost = new URL(raw, location.href).hostname.toLowerCase() } catch (_) {}
+        if (failedHost && state.routeNodes.includes(failedHost) && failedHost !== state.activeNode) {
+            return switchAutoRoute(routeSource, reason, failedHost)
+        }
+        const now = Date.now()
+        state.failures = state.failures.filter(entry => now - entry.at <= autoRuntimeFailureWindowMs)
+        state.failures.push({ at: now, weight: Math.max(1, Number(weight) || 1), reason })
+        const failureScore = state.failures.reduce((sum, entry) => sum + entry.weight, 0)
+        if (failureScore < 2) return false
+        return switchAutoRoute(routeSource, reason, state.activeNode)
+    }
+
+    const installPlaybackHealthListeners = () => {
+        if (window.top !== window || document.__CCB_PLAYBACK_HEALTH__) return
+        document.__CCB_PLAYBACK_HEALTH__ = true
+        const onPlaybackTrouble = (event) => {
+            const video = event && event.target
+            if (!video || String(video.tagName).toLowerCase() !== 'video'
+                || video.paused || video.seeking || video.ended || video.currentTime < 1
+            ) return
+            const bufferAhead = getPlaybackBufferAhead(video)
+            if (bufferAhead > 1.5) return
+            const reason = `${event.type}，缓冲 ${bufferAhead.toFixed(1)} 秒`
+            recordAutoPlaybackFailure(lastPlaybackMediaUrl || (autoLatestResult && autoLatestResult.sourceUrl) || '', reason, 2)
+        }
+        document.addEventListener('waiting', onPlaybackTrouble, true)
+        document.addEventListener('stalled', onPlaybackTrouble, true)
+        document.addEventListener('error', onPlaybackTrouble, true)
     }
 
     const selectProvisionalBackups = (seed, pool) => {
@@ -1432,6 +1745,7 @@
             node: seed.node,
             primary: seed,
             backups: selectProvisionalBackups(seed, pool),
+            sourceUrl,
             selectedAt: Date.now(),
             mbps: 0,
             ttfbMs: 0,
@@ -1487,6 +1801,38 @@
             results.push(await probeAutoNode(candidates[index], sourceUrl, bytes, timeoutMs, controller))
         }
         return results
+    }
+
+    const runAutoSustainedProbeRounds = async (candidates, sourceUrl, onProgress, controller) => {
+        const aggregates = []
+        for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
+            const candidate = candidates[candidateIndex]
+            const rounds = []
+            let knownTotalBytes = Math.max(0, Number(candidate.totalBytes) || 0)
+            for (let roundIndex = 0; roundIndex < autoSustainedRounds; roundIndex++) {
+                if (controller && controller.cancelled) break
+                if (onProgress) onProgress(candidateIndex, candidates.length, candidate, roundIndex, autoSustainedRounds)
+                const result = await probeAutoNode(
+                    candidate,
+                    sourceUrl,
+                    autoSustainedBytes,
+                    autoSustainedTimeoutMs,
+                    controller,
+                    {
+                        distributed: true,
+                        totalBytes: knownTotalBytes,
+                        roundIndex,
+                        rounds: autoSustainedRounds,
+                        seed: `${sourceUrl}:${candidate.node}`,
+                        deadlineMs: autoSustainedDeadlineMs,
+                    },
+                )
+                rounds.push(result)
+                knownTotalBytes = Math.max(knownTotalBytes, Number(result.totalBytes) || 0)
+            }
+            aggregates.push(aggregateAutoProbeRounds(candidate, rounds))
+        }
+        return aggregates
     }
 
     const pickAutoBackups = (primary, rankedSpeed, rankedReachable) => {
@@ -1573,13 +1919,11 @@
             || a.ttfbMs - b.ttfbMs
         ))
         const sustainedFinalists = pickAutoSustainedFinalists(rankedScreen)
-        const sustainedRound = await runAutoProbeSeries(
+        const sustainedRound = await runAutoSustainedProbeRounds(
             sustainedFinalists,
             sourceUrl,
-            autoSustainedBytes,
-            autoSustainedTimeoutMs,
-            (index, total, candidate) => {
-                emitAutoStatus('probing', `持续复测 ${index + 1}/${total}：${formatAutoNode(candidate)} × 1 MiB`, {
+            (index, total, candidate, roundIndex, rounds) => {
+                emitAutoStatus('probing', `真实分段 ${index + 1}/${total}：${formatAutoNode(candidate)}｜第 ${roundIndex + 1}/${rounds} 轮 × 3 MiB`, {
                     tested: pool.length,
                     reachable: reachable.length,
                     requiredMbps,
@@ -1598,7 +1942,10 @@
         ))
         const minimumSustainedMbps = Math.max(1, requiredMbps * autoBitrateHeadroom)
         const qualified = rankedSustained.filter(result => (
-            getSustainedMbps(result) >= minimumSustainedMbps && result.stability >= 0.45
+            getSustainedMbps(result) >= minimumSustainedMbps
+            && result.stability >= 0.45
+            && result.completionRate >= 1
+            && result.deadlineRate >= 2 / 3
         ))
         const originalSustained = rankedSustained.find(item => item.isOriginal)
         const originalReachable = rankedReachable.find(item => item.isOriginal)
@@ -1617,10 +1964,13 @@
         const verifiedSustained = rankedSustained.some(item => item.node === primary.node)
         const meetsHeadroom = verifiedSustained && getSustainedMbps(primary) >= minimumSustainedMbps
             && primary.stability >= 0.45
+            && primary.completionRate >= 1
+            && primary.deadlineRate >= 2 / 3
         const result = {
             node: primary.node,
             primary,
             backups,
+            sourceUrl,
             selectedAt: Date.now(),
             mbps: getSustainedMbps(primary),
             burstMbps: Number(primary.burstMbps) || Number(primary.mbps) || 0,
@@ -1634,6 +1984,8 @@
             verifiedTwice: verifiedSustained,
             verifiedSustained,
             meetsHeadroom,
+            completionRate: Number(primary.completionRate) || 0,
+            deadlineRate: Number(primary.deadlineRate) || 0,
             provisional: false,
             heldByHysteresis,
             failureCounts,
@@ -1646,7 +1998,7 @@
             ? '候选持续余量不足，回到'
             : (heldByHysteresis ? '持续差异不足 25%，保持' : (changed ? '切换到' : '保持'))
         const speedText = verifiedSustained
-            ? `持续低位 ${getSustainedMbps(primary).toFixed(2)} Mbps｜门槛 ${minimumSustainedMbps.toFixed(2)} Mbps｜稳定 ${Math.round(primary.stability * 100)}%`
+            ? `持续低位 ${getSustainedMbps(primary).toFixed(2)} Mbps｜门槛 ${minimumSustainedMbps.toFixed(2)} Mbps｜完整 ${Math.round(primary.completionRate * autoSustainedRounds)}/${autoSustainedRounds}｜限时 ${Math.round(primary.deadlineRate * autoSustainedRounds)}/${autoSustainedRounds}`
             : '仅通过连通验证'
         const backupText = backups.length ? backups.map(formatAutoNode).join('、') : 'B站原备份'
         emitAutoStatus('ready', `${action} ${formatAutoNode(primary)}｜${speedText}｜备用：${backupText}`, result)
@@ -1790,6 +2142,8 @@
         let runtimePendingCount = 0
         let runtimeLastHost = ''
         let runtimeFlushTimer = null
+        let routeNodes = []
+        let failedNodes = []
         const flushRuntimeStats = () => {
             runtimeFlushTimer = null
             if (!runtimeChannel || !runtimePendingCount) return
@@ -1812,6 +2166,12 @@
             forceReplace = !!(next && next.forceReplace)
             Replacement = (next && typeof next.replacement === 'string') ? next.replacement : ''
             replacementHost = (next && typeof next.replacementHost === 'string') ? next.replacementHost : ''
+            routeNodes = Array.isArray(next && next.routeNodes)
+                ? next.routeNodes.map(value => String(value || '').toLowerCase()).filter(Boolean)
+                : []
+            failedNodes = Array.isArray(next && next.failedNodes)
+                ? next.failedNodes.map(value => String(value || '').toLowerCase()).filter(Boolean)
+                : []
             setRuntimeChannel(next && next.runtimeChannelName)
         }
         applyConfig(cfg)
@@ -1854,11 +2214,29 @@
             if (!runtimeFlushTimer) runtimeFlushTimer = setTimeout(flushRuntimeStats, 250)
         }
 
+        const reportFailure = (url, reason) => {
+            if (!runtimeChannel || typeof url !== 'string' || !hasMedia(url)) return
+            try { runtimeChannel.postMessage({ type: 'ccb-worker-failure', url, reason }) } catch (_) {}
+        }
+
+        const getUrlHost = (value) => {
+            try {
+                let candidate = value
+                if (candidate.startsWith('//')) candidate = `https:${candidate}`
+                else if (!/^[a-z][a-z\d+.-]*:/i.test(candidate)) candidate = `https://${candidate}`
+                return new URL(candidate).hostname.toLowerCase().replace(/\.$/, '')
+            } catch (_) {
+                return ''
+            }
+        }
+
         const replaceUrl = (s) => {
             if (typeof s !== 'string') return s
             if (!shouldApply()) return s
             if (!hasMedia(s)) return s
             if (isIgnoredHost(s)) return s
+            const sourceHost = getUrlHost(s)
+            if (routeNodes.includes(sourceHost) && !failedNodes.includes(sourceHost)) return s
             let out = s
             if (s.startsWith('http://') || s.startsWith('https://')) out = s.replace(/^https?:\/\/.*?\//, Replacement)
             else if (s.startsWith('//')) out = s.replace(/^\/\/.*?\//, Replacement.replace(/^https?:/, ''))
@@ -1870,6 +2248,7 @@
         const Ofetch = self.fetch
         if (Ofetch) {
             self.fetch = (input, init) => {
+                let mediaUrl = ''
                 try {
                     const s = typeof input === 'string' ? input : (input && input.url)
                     if (typeof s === 'string') {
@@ -1881,9 +2260,16 @@
                                 if (Req) input = new Req(r, input)
                             }
                         }
+                        mediaUrl = r
                     }
                 } catch (_) {}
-                return Ofetch(input, init)
+                return Ofetch(input, init).then(response => {
+                    if (response && response.status >= 400) reportFailure(mediaUrl, `Worker HTTP ${response.status}`)
+                    return response
+                }, error => {
+                    reportFailure(mediaUrl, 'Worker fetch 网络错误')
+                    throw error
+                })
             }
         }
 
@@ -1893,6 +2279,15 @@
                 open(...args) {
                     try {
                         if (typeof args[1] === 'string') args[1] = replaceUrl(args[1])
+                        this._ccbMediaUrl = typeof args[1] === 'string' && hasMedia(args[1]) ? args[1] : ''
+                        if (this._ccbMediaUrl && !this._ccbFailureHooked) {
+                            this._ccbFailureHooked = true
+                            this.addEventListener('timeout', () => reportFailure(this._ccbMediaUrl, 'Worker XHR 超时'))
+                            this.addEventListener('error', () => reportFailure(this._ccbMediaUrl, 'Worker XHR 网络错误'))
+                            this.addEventListener('load', () => {
+                                if (this.status >= 400) reportFailure(this._ccbMediaUrl, `Worker HTTP ${this.status}`)
+                            })
+                        }
                     } catch (_) {}
                     return super.open(...args)
                 }
@@ -1905,10 +2300,13 @@
         const contextKey = getContextKey()
         if (workerPreludeCache && workerPreludeContextKey === contextKey) return workerPreludeCache
 
+        const routeConfig = getAutoRouteConfig()
         const cfg = {
             forceReplace: shouldApplyReplacement(),
             replacement: getReplacement(),
             replacementHost: getReplacementHost(),
+            routeNodes: routeConfig.routeNodes,
+            failedNodes: routeConfig.failedNodes,
             runtimeChannelName: ccbWorkerRuntimeChannelName,
         }
         const runtime = `(${installCcbWorkerRuntime.toString()})(${JSON.stringify(cfg)});`
@@ -1924,11 +2322,14 @@
     const sendCcbWorkerConfig = (worker) => {
         if (!worker || typeof worker.postMessage !== 'function') return
         try {
+            const routeConfig = getAutoRouteConfig()
             worker.postMessage({
                 __CCB_AUTO_CONFIG__: {
                     forceReplace: shouldApplyReplacement(),
                     replacement: getReplacement(),
                     replacementHost: getReplacementHost(),
+                    routeNodes: routeConfig.routeNodes,
+                    failedNodes: routeConfig.failedNodes,
                     runtimeChannelName: ccbWorkerRuntimeChannelName,
                 },
             })
@@ -1983,6 +2384,15 @@
                         this._ccbResponseTextMemo = xhrMemoUnset
                         try {
                             if (typeof args[1] === 'string') args[1] = replaceMediaUrl(args[1])
+                            this._ccbMediaUrl = typeof args[1] === 'string' && hasMediaDomain(args[1]) ? args[1] : ''
+                            if (this._ccbMediaUrl && !this._ccbFailureHooked) {
+                                this._ccbFailureHooked = true
+                                this.addEventListener('timeout', () => recordAutoPlaybackFailure(this._ccbMediaUrl, 'XHR 超时', 2))
+                                this.addEventListener('error', () => recordAutoPlaybackFailure(this._ccbMediaUrl, 'XHR 网络错误', 2))
+                                this.addEventListener('load', () => {
+                                    if (this.status >= 400) recordAutoPlaybackFailure(this._ccbMediaUrl, `HTTP ${this.status}`, 2)
+                                })
+                            }
                             this._ccbIntercept = !!handle(null, args[1], { type: 'xhr', xhr: this })
                         } catch (_) {}
                         return super.open(...args)
@@ -2020,8 +2430,16 @@
 
                     const s = typeof input === 'string' ? input : (input && input.url)
                     const shouldIntercept = handle(null, s, { type: 'fetch', input, init })
-                    if (!shouldIntercept) return Ofetch(input, init)
-                    return Ofetch(input, init).then(resp => {
+                    const mediaRequest = typeof s === 'string' && hasMediaDomain(s)
+                    const request = Ofetch(input, init).then(resp => {
+                        if (mediaRequest && resp && resp.status >= 400) recordAutoPlaybackFailure(s, `HTTP ${resp.status}`, 2)
+                        return resp
+                    }, error => {
+                        if (mediaRequest) recordAutoPlaybackFailure(s, 'fetch 网络错误', 2)
+                        throw error
+                    })
+                    if (!shouldIntercept) return request
+                    return request.then(resp => {
                         // 老引擎没有 Response.body 属性,不能把"属性缺失"当成"空响应体"
                         if (('body' in resp && !resp.body) || resp.status === 204 || resp.status === 205 || resp.status === 304) return resp
                         return resp.text().then(text => {
@@ -2131,6 +2549,7 @@
         }
 
         hookWindow(theWindow)
+        installPlaybackHealthListeners()
         register._hookWindow = hookWindow
         return register
     })(unsafeWindow)
@@ -2751,7 +3170,26 @@
         emitBenchmarkStatus({ state: 'running', phase: label, completed: 0, total, message: `${label}：0/${total}` })
         for (let round = 0; round < rounds && !controller.cancelled; round++) {
             await runBenchmarkPool(records, concurrency, async (record) => {
-                const result = await probeAutoNode(record.candidate, controller.sourceUrl, bytes, timeoutMs, controller)
+                const knownTotalBytes = Math.max(
+                    0,
+                    ...record.reach.map(result => Number(result.totalBytes) || 0),
+                    ...record.speed.map(result => Number(result.totalBytes) || 0),
+                    ...record.deep.map(result => Number(result.totalBytes) || 0),
+                )
+                const result = await probeAutoNode(
+                    record.candidate,
+                    controller.sourceUrl,
+                    bytes,
+                    timeoutMs,
+                    controller,
+                    field === 'deep' ? {
+                        distributed: true,
+                        totalBytes: knownTotalBytes,
+                        roundIndex: round,
+                        rounds,
+                        seed: `${controller.sourceUrl}:${record.candidate.node}`,
+                    } : null,
+                )
                 record[field].push(result)
                 controller.transferredBytes += Number(result.transferredBytes) || Number(result.bytes) || 0
             }, controller, update)
@@ -2988,7 +3426,7 @@
             const brand = el('div', 'ccb-brand')
             brand.appendChild(el('div', 'ccb-title', 'CCB 智能网络'))
             brand.appendChild(el('div', 'ccb-subtitle', '持续能力排名 · 当前视频码率门槛'))
-            const version = el('div', 'ccb-version', 'v2.5')
+            const version = el('div', 'ccb-version', 'v2.5.2')
             const closeBtn = el('button', 'ccb-icon-btn', '×')
             closeBtn.type = 'button'
             closeBtn.title = '关闭'
@@ -3072,7 +3510,7 @@
             const autoHead = el('div', 'ccb-card-head')
             const autoHeading = el('div')
             autoHeading.appendChild(el('div', 'ccb-card-title', '日常智能选线'))
-            const autoDescription = el('div', 'ccb-card-desc', '7 个连通候选 → 4 个短筛 → 3 个 1 MiB 串行持续复测；单个视频最多约 4 MiB，不会逐分片测速。')
+            const autoDescription = el('div', 'ccb-card-desc', '7 个连通候选 → 4 个短筛 → 3 个节点各做 3 轮 3 MiB 真实分段复测；最多约 28 MiB，不会逐分片测速。')
             autoHeading.appendChild(autoDescription)
             const autoSourcePill = el('div', 'ccb-status-pill')
             autoHead.appendChild(autoHeading)
@@ -3370,14 +3808,15 @@
             const renderRoute = () => {
                 const enabled = getAutoMode() !== autoModeOff
                 const result = enabled && autoLatestResult
-                const primary = result && result.primary
+                const activeNode = result && (result.activeNode || result.node)
                 const manual = getTargetCdnNode('main')
-                routeNode.textContent = primary
-                    ? (primary.node || 'B站原始源')
+                routeNode.textContent = activeNode
+                    ? activeNode
                     : (enabled ? '等待当前视频地址' : manual)
                 routeBadge.textContent = enabled ? '持续智能选线' : '手动模式'
                 routeMeta.textContent = result
                     ? '选定于 ' + formatClock(result.selectedAt) + ' · ' + (result.provisional ? '快速启动，后台复核中' : '当前视频已复核')
+                        + (result.runtimeSwitches ? ` · 已自动切换 ${result.runtimeSwitches} 次` : '')
                     : (enabled ? '播放视频后自动选择；不会逐分片测速' : '刷新页面后应用这个手动节点')
                 const stats = readAggregateStats()
                 runtimeHost.textContent = stats.host ? '最近实际改写 → ' + stats.host : '尚未捕获媒体改写请求'

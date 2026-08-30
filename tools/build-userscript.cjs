@@ -10,6 +10,8 @@ const modulePaths = [
     path.join(root, 'src', 'core', 'benchmark-math.js'),
     path.join(root, 'src', 'core', 'worker-url.js'),
     path.join(root, 'src', 'core', 'catalog-version.js'),
+    path.join(root, 'src', 'core', 'probe-range.js'),
+    path.join(root, 'src', 'core', 'runtime-route.js'),
 ]
 
 function normalizeNewlines(value) {
