@@ -537,7 +537,8 @@
         let host = ''
         try { host = new URL(raw, location.href).hostname } catch (_) {}
         const state = getAutoRuntimeState(raw, result)
-        return !!state && ccbShouldPreserveRouteHost(host, state.routeNodes, [...state.failedNodes])
+        return !!state && ccbNormalizeRouteHost(host) === state.activeNode
+            && ccbShouldPreserveRouteHost(host, state.routeNodes, [...state.failedNodes])
     }
     const getAutoSelectedNode = (raw) => {
         if (!isAutoModeEnabled()) return ''
@@ -2142,6 +2143,7 @@
         let runtimePendingCount = 0
         let runtimeLastHost = ''
         let runtimeFlushTimer = null
+        let activeNode = ''
         let routeNodes = []
         let failedNodes = []
         const flushRuntimeStats = () => {
@@ -2166,6 +2168,7 @@
             forceReplace = !!(next && next.forceReplace)
             Replacement = (next && typeof next.replacement === 'string') ? next.replacement : ''
             replacementHost = (next && typeof next.replacementHost === 'string') ? next.replacementHost : ''
+            activeNode = String(next && next.activeNode || replacementHost || '').toLowerCase()
             routeNodes = Array.isArray(next && next.routeNodes)
                 ? next.routeNodes.map(value => String(value || '').toLowerCase()).filter(Boolean)
                 : []
@@ -2236,7 +2239,7 @@
             if (!hasMedia(s)) return s
             if (isIgnoredHost(s)) return s
             const sourceHost = getUrlHost(s)
-            if (routeNodes.includes(sourceHost) && !failedNodes.includes(sourceHost)) return s
+            if (sourceHost === activeNode && routeNodes.includes(sourceHost) && !failedNodes.includes(sourceHost)) return s
             let out = s
             if (s.startsWith('http://') || s.startsWith('https://')) out = s.replace(/^https?:\/\/.*?\//, Replacement)
             else if (s.startsWith('//')) out = s.replace(/^\/\/.*?\//, Replacement.replace(/^https?:/, ''))
@@ -2305,6 +2308,7 @@
             forceReplace: shouldApplyReplacement(),
             replacement: getReplacement(),
             replacementHost: getReplacementHost(),
+            activeNode: routeConfig.activeNode,
             routeNodes: routeConfig.routeNodes,
             failedNodes: routeConfig.failedNodes,
             runtimeChannelName: ccbWorkerRuntimeChannelName,
@@ -2328,6 +2332,7 @@
                     forceReplace: shouldApplyReplacement(),
                     replacement: getReplacement(),
                     replacementHost: getReplacementHost(),
+                    activeNode: routeConfig.activeNode,
                     routeNodes: routeConfig.routeNodes,
                     failedNodes: routeConfig.failedNodes,
                     runtimeChannelName: ccbWorkerRuntimeChannelName,
